@@ -8,75 +8,168 @@ import struct
 from pathlib import Path
 
 
+def error(message, exit_code=1):
+    """Print error message to stderr and exit with specified code."""
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def validate_git_repository():
+    """Ensure we're in a valid Git repository."""
+    if not os.path.isdir(".git"):
+        error("not a git repository (or any of the parent directories)")
+    
+    required_paths = [
+        ".git/objects",
+        ".git/refs",
+        ".git/HEAD"
+    ]
+    
+    for path in required_paths:
+        if not os.path.exists(path):
+            error(f"corrupt git repository: {path} not found")
+
+
 def main():
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!", file=sys.stderr)
 
+    if len(sys.argv) < 2:
+        error("No command specified")
+    
     command = sys.argv[1]
-    if command == "init":
-        os.mkdir(".git")
-        os.mkdir(".git/objects")
-        os.mkdir(".git/refs")
-        with open(".git/HEAD", "w") as f:
-            f.write("ref: refs/heads/main\n")
-        print("Initialized git directory")
-    elif command == "cat-file" and len(sys.argv) > 3 and sys.argv[2] == "-p":
-        object_hash = sys.argv[3]
-        cat_file(object_hash)
-    elif command == "hash-object" and "-w" in sys.argv and len(sys.argv) > 3:
-        file_path = sys.argv[sys.argv.index("-w") + 1] if sys.argv.index("-w") < len(sys.argv) - 1 else sys.argv[-1]
-        print(hash_object(file_path, write=True))
-    elif command == "ls-tree" and "--name-only" in sys.argv and len(sys.argv) > 3:
-        tree_hash = sys.argv[-1]
-        ls_tree(tree_hash, name_only=True)
-    elif command == "write-tree":
-        print(write_tree())
-    elif command == "commit-tree":
-        # Parse arguments
-        tree_sha = sys.argv[2]
-        parent_sha = None
-        message = None
-        
-        # Find -p and -m arguments
-        for i in range(3, len(sys.argv)):
-            if sys.argv[i] == "-p" and i + 1 < len(sys.argv):
-                parent_sha = sys.argv[i + 1]
-            elif sys.argv[i] == "-m" and i + 1 < len(sys.argv):
-                message = sys.argv[i + 1]
-        
-        # Create commit and print hash
-        print(commit_tree(tree_sha, parent_sha, message))
-    elif command == "clone":
-        url = sys.argv[2]
-        target_dir = sys.argv[3]
-        clone_repository(url, target_dir)
-    else:
-        raise RuntimeError(f"Unknown command #{command}")
+    
+    try:
+        if command == "init":
+            try:
+                os.mkdir(".git")
+                os.mkdir(".git/objects")
+                os.mkdir(".git/refs")
+                with open(".git/HEAD", "w") as f:
+                    f.write("ref: refs/heads/main\n")
+                print("Initialized git directory")
+            except FileExistsError:
+                error("Git repository already exists")
+            except PermissionError:
+                error("Permission denied")
+                
+        elif command == "cat-file" and len(sys.argv) > 3 and sys.argv[2] == "-p":
+            object_hash = sys.argv[3]
+            cat_file(object_hash)
+            
+        elif command == "hash-object" and "-w" in sys.argv and len(sys.argv) > 3:
+            file_path = sys.argv[sys.argv.index("-w") + 1] if sys.argv.index("-w") < len(sys.argv) - 1 else sys.argv[-1]
+            try:
+                print(hash_object(file_path, write=True))
+            except FileNotFoundError:
+                error(f"Cannot open '{file_path}': No such file")
+                
+        elif command == "ls-tree" and "--name-only" in sys.argv and len(sys.argv) > 3:
+            tree_hash = sys.argv[-1]
+            ls_tree(tree_hash, name_only=True)
+            
+        elif command == "write-tree":
+            print(write_tree())
+            
+        elif command == "commit-tree":
+            # Parse arguments
+            if len(sys.argv) < 3:
+                error("tree argument required")
+                
+            tree_sha = sys.argv[2]
+            parent_sha = None
+            message = None
+            
+            # Find -p and -m arguments
+            for i in range(3, len(sys.argv)):
+                if sys.argv[i] == "-p" and i + 1 < len(sys.argv):
+                    parent_sha = sys.argv[i + 1]
+                elif sys.argv[i] == "-m" and i + 1 < len(sys.argv):
+                    message = sys.argv[i + 1]
+            
+            if message is None:
+                error("message argument required")
+                
+            # Create commit and print hash
+            print(commit_tree(tree_sha, parent_sha, message))
+            
+        elif command == "clone":
+            if len(sys.argv) < 4:
+                error("URL and directory arguments required")
+                
+            url = sys.argv[2]
+            target_dir = sys.argv[3]
+            clone_repository(url, target_dir)
+            
+        elif command == "branch":
+            branch_command(sys.argv[2:])
+            
+        elif command == "checkout":
+            if len(sys.argv) < 3:
+                error("branch/commit argument required")
+                
+            checkout(sys.argv[2])
+            
+        elif command == "log":
+            log_command(sys.argv[2:])
+            
+        elif command == "status":
+            status_command()
+            
+        elif command == "config":
+            config_command(sys.argv[2:])
+            
+        elif command == "remote":
+            remote_command(sys.argv[2:])
+            
+        else:
+            error(f"Unknown command '{command}'")
+            
+    except KeyboardInterrupt:
+        sys.exit(130)  # Standard exit code for Ctrl+C
+    except Exception as e:
+        error(f"Unexpected error: {str(e)}")
 
 
 def cat_file(object_hash):
-    # Construct the path to the object file
-    # Path format: .git/objects/<first-2-chars>/<remaining-38-chars>
+    """Display the contents of a Git object."""
+    validate_git_repository()
+    
+    # Validate hash format
+    if not all(c in "0123456789abcdef" for c in object_hash) or len(object_hash) != 40:
+        error(f"invalid object name: '{object_hash}'")
+    
+    # Construct object path
     object_dir = os.path.join(".git", "objects", object_hash[:2])
     object_path = os.path.join(object_dir, object_hash[2:])
     
-    # Read and decompress the object
-    with open(object_path, "rb") as f:
-        compressed_data = f.read()
+    try:
+        # Read and decompress the object
+        with open(object_path, "rb") as f:
+            compressed_data = f.read()
+    except FileNotFoundError:
+        error(f"object '{object_hash}' not found")
+    except PermissionError:
+        error(f"permission denied accessing object: '{object_hash}'")
     
-    decompressed_data = zlib.decompress(compressed_data)
+    try:
+        decompressed_data = zlib.decompress(compressed_data)
+    except zlib.error:
+        error(f"object '{object_hash}' is corrupted or not a valid git object")
     
-    # Find the null byte that separates header from content
+    # Find null byte separator
     null_byte_index = decompressed_data.find(b'\x00')
     if null_byte_index == -1:
-        raise RuntimeError("Invalid git object: missing null byte separator")
+        error(f"object '{object_hash}' has invalid format: missing null byte separator")
     
-    # Parse header (format: "blob <size>\0<content>")
-    header = decompressed_data[:null_byte_index].decode()
-    if not header.startswith("blob "):
-        raise RuntimeError(f"Expected a blob object, got: {header.split()[0]}")
+    # Parse header
+    try:
+        header = decompressed_data[:null_byte_index].decode()
+        obj_type = header.split()[0]
+    except (UnicodeDecodeError, IndexError):
+        error(f"object '{object_hash}' has invalid header format")
     
-    # Extract and output content without adding a newline
+    # Output content based on object type
     content = decompressed_data[null_byte_index + 1:]
     sys.stdout.buffer.write(content)
 
@@ -186,15 +279,20 @@ def hash_object(file_path, write=False):
     return sha
 
 
-def write_tree():
+def write_tree(write=True):
     """
     Write the current directory as a tree object to the Git object store.
-    Returns the SHA-1 hash of the tree object.
+    
+    Args:
+        write (bool): Whether to actually write the tree object
+    
+    Returns:
+        str: The SHA-1 hash of the tree object
     """
-    return write_tree_recursive(".")
+    return write_tree_recursive(".", write)
 
 
-def write_tree_recursive(directory):
+def write_tree_recursive(directory, write):
     """
     Recursively write a directory as a tree object to the Git object store.
     Returns the SHA-1 hash of the tree object.
@@ -214,7 +312,7 @@ def write_tree_recursive(directory):
         if os.path.isdir(path):
             # For directories, recursively create tree objects
             mode = "40000"  # Directory mode
-            sha = write_tree_recursive(path)
+            sha = write_tree_recursive(path, write)
             # Convert hex SHA to binary
             sha_binary = bytes.fromhex(sha)
         else:
@@ -224,7 +322,7 @@ def write_tree_recursive(directory):
             else:
                 mode = "100644"  # Regular file mode
             
-            sha = hash_object(path, write=True)
+            sha = hash_object(path, write)
             # Convert hex SHA to binary
             sha_binary = bytes.fromhex(sha)
             
@@ -241,16 +339,17 @@ def write_tree_recursive(directory):
     # Compute the SHA-1 hash
     sha = hashlib.sha1(tree_header + tree_content).hexdigest()
     
-    # Write the tree object
-    object_dir = os.path.join(".git", "objects", sha[:2])
-    if not os.path.exists(object_dir):
-        os.makedirs(object_dir)
-    
-    object_path = os.path.join(object_dir, sha[2:])
-    
-    with open(object_path, 'wb') as f:
-        compressed_data = zlib.compress(tree_header + tree_content)
-        f.write(compressed_data)
+    if write:
+        # Write the tree object
+        object_dir = os.path.join(".git", "objects", sha[:2])
+        if not os.path.exists(object_dir):
+            os.makedirs(object_dir)
+        
+        object_path = os.path.join(object_dir, sha[2:])
+        
+        with open(object_path, 'wb') as f:
+            compressed_data = zlib.compress(tree_header + tree_content)
+            f.write(compressed_data)
     
     return sha
 
@@ -300,23 +399,38 @@ def commit_tree(tree_sha, parent_sha, message):
 
 
 def clone_repository(url, target_dir):
-    """
-    Clone a Git repository from a URL into the target directory.
-    """
+    """Clone a Git repository from a URL into the target directory."""
     parent = Path(target_dir)
     
-    # Initialize new repository
-    parent.mkdir(parents=True, exist_ok=True)
-    (parent / ".git").mkdir(parents=True)
-    (parent / ".git" / "objects").mkdir(parents=True)
-    (parent / ".git" / "refs").mkdir(parents=True)
-    (parent / ".git" / "refs" / "heads").mkdir(parents=True)
-    (parent / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    # Check if directory already exists and is not empty
+    if parent.exists() and any(parent.iterdir()):
+        error(f"destination path '{target_dir}' already exists and is not an empty directory")
+    
+    try:
+        # Initialize new repository
+        parent.mkdir(parents=True, exist_ok=True)
+        (parent / ".git").mkdir(parents=True)
+        (parent / ".git" / "objects").mkdir(parents=True)
+        (parent / ".git" / "refs").mkdir(parents=True)
+        (parent / ".git" / "refs" / "heads").mkdir(parents=True)
+        (parent / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    except PermissionError:
+        error(f"permission denied creating repository structure in '{target_dir}'")
+    except OSError as e:
+        error(f"failed to create repository: {str(e)}")
     
     # Fetch refs
-    req = urllib.request.Request(f"{url}/info/refs?service=git-upload-pack")
-    with urllib.request.urlopen(req) as f:
-        refs_data = f.read()
+    print(f"Cloning from {url} into {target_dir}...", file=sys.stderr)
+    try:
+        req = urllib.request.Request(f"{url}/info/refs?service=git-upload-pack")
+        with urllib.request.urlopen(req, timeout=30) as f:
+            refs_data = f.read()
+    except urllib.error.URLError as e:
+        error(f"failed to fetch refs: {str(e.reason)}")
+    except urllib.error.HTTPError as e:
+        error(f"HTTP error: {e.code} {e.reason}")
+    except TimeoutError:
+        error("connection timed out")
     
     # Parse refs
     refs = {}
@@ -604,6 +718,355 @@ def render_tree(repo_root, target_dir, tree_sha):
         
         # Move to next entry
         i = null_pos + 21
+
+
+def get_current_branch():
+    """Get the name of the current branch or None if in detached HEAD state."""
+    validate_git_repository()
+    
+    try:
+        with open(".git/HEAD", "r") as f:
+            head_content = f.read().strip()
+        
+        if head_content.startswith("ref: refs/heads/"):
+            return head_content[16:]
+        return None  # Detached HEAD
+    except FileNotFoundError:
+        error("HEAD file missing")
+    except IOError:
+        error("couldn't read HEAD file")
+
+
+def branch_command(args):
+    """Handle git branch command with various options."""
+    validate_git_repository()
+    
+    # Create branch directory if it doesn't exist
+    heads_dir = Path(".git/refs/heads")
+    heads_dir.mkdir(exist_ok=True)
+    
+    # Parse options
+    delete_branch = "-d" in args or "--delete" in args
+    list_branches = not args or (len(args) == 1 and args[0] in ["-d", "--delete"])
+    
+    if delete_branch:
+        # Get branch name to delete
+        try:
+            if args[args.index("-d" if "-d" in args else "--delete") + 1:]:
+                branch_name = args[args.index("-d" if "-d" in args else "--delete") + 1]
+            else:
+                error("branch name required")
+        except IndexError:
+            error("branch name required")
+            
+        branch_path = heads_dir / branch_name
+        if not branch_path.exists():
+            error(f"branch '{branch_name}' not found")
+            
+        current = get_current_branch()
+        if current == branch_name:
+            error(f"cannot delete branch '{branch_name}' checked out")
+            
+        try:
+            branch_path.unlink()
+            print(f"Deleted branch {branch_name}")
+        except OSError:
+            error(f"could not delete branch '{branch_name}'")
+    
+    elif list_branches:
+        # List all branches
+        current = get_current_branch()
+        branches = sorted([p.name for p in heads_dir.iterdir() if p.is_file()])
+        
+        for branch in branches:
+            prefix = "* " if branch == current else "  "
+            print(f"{prefix}{branch}")
+    
+    else:
+        # Create new branch
+        branch_name = args[0]
+        
+        # Get current HEAD commit
+        current_commit = resolve_ref("HEAD")
+        if not current_commit:
+            error("failed to get HEAD commit")
+        
+        branch_path = heads_dir / branch_name
+        if branch_path.exists():
+            error(f"branch '{branch_name}' already exists")
+        
+        try:
+            with open(branch_path, "w") as f:
+                f.write(f"{current_commit}\n")
+            print(f"Created branch {branch_name}")
+        except IOError:
+            error(f"could not create branch '{branch_name}'")
+
+
+def resolve_ref(ref_name):
+    """Resolve a reference to its commit SHA."""
+    validate_git_repository()
+    
+    try:
+        # Direct reference to a commit
+        if all(c in "0123456789abcdef" for c in ref_name) and len(ref_name) == 40:
+            return ref_name
+        
+        # HEAD reference
+        if ref_name == "HEAD":
+            with open(".git/HEAD", "r") as f:
+                head_content = f.read().strip()
+            
+            if head_content.startswith("ref: "):
+                ref_path = head_content[5:]  # Skip "ref: "
+                return resolve_ref(ref_path)
+            else:
+                # Detached HEAD
+                return head_content
+        
+        # Branch reference
+        if not ref_name.startswith("refs/"):
+            # Try as a branch name
+            branch_path = f".git/refs/heads/{ref_name}"
+            if os.path.exists(branch_path):
+                with open(branch_path, "r") as f:
+                    return f.read().strip()
+            
+            # Not found as branch, try full reference path
+            ref_path = f".git/refs/{ref_name}"
+        else:
+            ref_path = f".git/{ref_name}"
+        
+        if os.path.exists(ref_path):
+            with open(ref_path, "r") as f:
+                return f.read().strip()
+        
+        return None
+    except (FileNotFoundError, IOError):
+        return None
+
+
+def checkout(target):
+    """
+    Check out a branch or commit.
+    
+    Args:
+        target (str): Branch name or commit hash to checkout
+    """
+    validate_git_repository()
+    
+    # Resolve the target to a commit SHA
+    commit_sha = resolve_ref(target)
+    if not commit_sha:
+        error(f"pathspec '{target}' did not match any file(s) known to git")
+    
+    # Get the tree SHA from the commit
+    try:
+        _, commit_content = read_object(Path("."), commit_sha)
+        tree_sha = commit_content.split(b'\n')[0][5:].decode()
+    except Exception:
+        error(f"failed to get tree from commit '{commit_sha}'")
+    
+    # Check for uncommitted changes
+    if has_uncommitted_changes():
+        error("Your local changes would be overwritten by checkout.\n"
+              "Please commit your changes or stash them before you switch branches.")
+    
+    # Update HEAD
+    is_branch = os.path.exists(f".git/refs/heads/{target}")
+    try:
+        with open(".git/HEAD", "w") as f:
+            if is_branch:
+                f.write(f"ref: refs/heads/{target}\n")
+            else:
+                # Detached HEAD state
+                f.write(f"{commit_sha}\n")
+    except IOError:
+        error("failed to update HEAD")
+    
+    # Clean working directory
+    working_dir = Path(".")
+    for item in working_dir.iterdir():
+        if item.name != ".git":
+            if item.is_dir():
+                import shutil
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+    
+    # Render the tree
+    render_tree(Path("."), working_dir, tree_sha)
+    
+    if is_branch:
+        print(f"Switched to branch '{target}'")
+    else:
+        print(f"Note: checking out '{commit_sha[:7]}'")
+        print("You are in 'detached HEAD' state.")
+
+
+def has_uncommitted_changes():
+    """
+    Check if there are uncommitted changes in the working directory.
+    
+    Returns:
+        bool: True if there are uncommitted changes
+    """
+    # This is a simplified version - a real implementation would compare
+    # the working directory with the index and HEAD tree
+    current_tree = write_tree(write=False)
+    head_tree = None
+    
+    try:
+        head_commit = resolve_ref("HEAD")
+        if head_commit:
+            _, commit_content = read_object(Path("."), head_commit)
+            head_tree = commit_content.split(b'\n')[0][5:].decode()
+    except Exception:
+        # If we can't get HEAD tree, assume there are changes
+        return True
+    
+    # If we don't have a HEAD tree, there's no uncommitted changes
+    if not head_tree:
+        return False
+    
+    return current_tree != head_tree
+
+
+def log_command(args):
+    """
+    Show commit logs.
+    
+    Args:
+        args (list): Command arguments
+    """
+    validate_git_repository()
+    
+    # Parse options
+    commit_limit = None
+    for i, arg in enumerate(args):
+        if arg == "-n" and i+1 < len(args):
+            try:
+                commit_limit = int(args[i+1])
+            except ValueError:
+                error(f"invalid number: '{args[i+1]}'")
+    
+    # Start from HEAD
+    current_commit = resolve_ref("HEAD")
+    if not current_commit:
+        error("HEAD not found")
+    
+    # Display commit history
+    displayed = 0
+    while current_commit and (commit_limit is None or displayed < commit_limit):
+        try:
+            # Get commit object
+            commit_type, commit_content = read_object(Path("."), current_commit)
+            if commit_type != "commit":
+                error(f"object {current_commit} is not a commit")
+            
+            # Parse commit content
+            commit_lines = commit_content.split(b'\n')
+            
+            # Extract commit metadata
+            tree_line = next((l for l in commit_lines if l.startswith(b'tree')), None)
+            author_line = next((l for l in commit_lines if l.startswith(b'author')), None)
+            parent_line = next((l for l in commit_lines if l.startswith(b'parent')), None)
+            
+            if not tree_line or not author_line:
+                error(f"malformed commit object: {current_commit}")
+            
+            # Format author info
+            author_info = author_line.decode('utf-8', 'replace')
+            author_parts = author_info.split(" ")
+            
+            if len(author_parts) >= 3:
+                # Extract timestamp
+                try:
+                    author_time = int(author_parts[-2])
+                    author_date = time.strftime("%a %b %d %H:%M:%S %Y %z", time.localtime(author_time))
+                except (ValueError, IndexError):
+                    author_date = "unknown date"
+                
+                # Get author name by removing "author " prefix and timestamp/timezone
+                author_name = " ".join(author_parts[1:-2])
+            else:
+                author_name = "Unknown"
+                author_date = "unknown date"
+            
+            # Get commit message (everything after the blank line)
+            message_start = 0
+            for i, line in enumerate(commit_lines):
+                if line == b'':
+                    message_start = i + 1
+                    break
+            
+            commit_message = b'\n'.join(commit_lines[message_start:])
+            
+            # Print commit info
+            print(f"commit {current_commit}")
+            print(f"Author: {author_name}")
+            print(f"Date:   {author_date}")
+            print()
+            print(f"    {commit_message.decode('utf-8', 'replace')}")
+            print()
+            
+            displayed += 1
+            
+            # Move to parent commit if available
+            if parent_line:
+                current_commit = parent_line.split()[1].decode()
+            else:
+                current_commit = None
+                
+        except Exception as e:
+            error(f"failed to read commit {current_commit}: {str(e)}")
+
+
+def status_command():
+    """Show the working tree status."""
+    validate_git_repository()
+    
+    # Get current branch
+    branch = get_current_branch()
+    if branch:
+        print(f"On branch {branch}")
+    else:
+        print("HEAD detached at", resolve_ref("HEAD")[:7])
+    
+    # Compare working dir with HEAD
+    # ... implementation would identify modified/new/deleted files ...
+    
+    # This requires a more extensive implementation to compare trees
+
+
+def config_command(args):
+    """Get and set repository or global options."""
+    # Determine if we're setting or getting
+    if len(args) == 2:
+        # Setting a config value
+        key, value = args
+        set_config_value(key, value)
+    elif len(args) == 1:
+        # Getting a config value
+        key = args[0]
+        value = get_config_value(key)
+        if value:
+            print(value)
+    else:
+        error("incorrect number of arguments")
+
+
+def remote_command(args):
+    """Manage set of tracked repositories."""
+    if not args:
+        # List remotes
+        list_remotes()
+    elif args[0] == "add" and len(args) >= 3:
+        # Add a remote
+        name, url = args[1], args[2]
+        add_remote(name, url)
+    else:
+        error("incorrect number of arguments")
 
 
 if __name__ == "__main__":
